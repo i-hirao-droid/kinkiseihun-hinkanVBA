@@ -4,7 +4,7 @@
 ' Date:   2025/10/17 (Revised: 2025/11/10)
 ' Description: 「製品」シートから「ISO」シートへデータを加工・転記するメインモジュール。
 '              指定のコードをベースに、転記後のISOシートAI列をチェックして蛋白を空欄にする処理を追加。
-'              (2025/11/10 修正: スキップ条件・整形条件の追加、蛋白判定ロジックの一本化)
+'              (2025/11/10 修正: スキップ条件・整形条件・蛋白判定ロジック・%値の補正)
 '==================================================================================================
 Option Explicit
 
@@ -125,7 +125,6 @@ Private Function ProcessDataTransfer(ByVal lngStartRow As Long, ByVal lngEndRow 
     Dim varSourceData As Variant, varDestData() As Variant
     Dim lngRowCount As Long, lngDestRow As Long, i As Long, lngCopyCount As Long, lngSkippedCount As Long
     Dim strSkipLog As String, arrRowData() As Variant
-    ' ★修正★ dicProteinProcessed は不要になったため削除
     
     lngRowCount = lngEndRow - lngStartRow - 1: If lngRowCount <= 0 Then Exit Function
     varSourceData = wsProduct.Range(COL_COPY_START & lngStartRow + 1 & ":" & COL_COPY_END & lngEndRow - 1).Value
@@ -150,19 +149,28 @@ Private Function ProcessDataTransfer(ByVal lngStartRow As Long, ByVal lngEndRow 
             arrRowData(colIdxAsh) = FormatNumberValue(varSourceData(i, srcAshColInArray), 4)
         End If
 
+        ' ★★★★★ 修正 ★★★★★
+        ' 水分・灰分の除算ロジックを削除
+        ' ★★★★★ 修正ここまで ★★★★★
+
         Dim strFactorySample As String: strFactorySample = Trim(CStr(IIf(IsError(varSourceData(i, colIdxFactory)), "", varSourceData(i, colIdxFactory))))
-        Dim strPackaging As String: strPackaging = Trim(CStr(IIf(IsError(varSourceData(i, colIdxPackaging)), "", varSourceData(i, colIdxPackaging)))) ' ★追加★
+        Dim strPackaging As String: strPackaging = Trim(CStr(IIf(IsError(varSourceData(i, colIdxPackaging)), "", varSourceData(i, colIdxPackaging))))
         Dim varProteinValue As Variant: varProteinValue = FormatNumberValue(varSourceData(i, srcProteinColInArray), 4)
 
         ' ★★★★★ 修正 ★★★★★
+        ' %表記の列(粗蛋白)は100で除算し、Excelの%表示に対応する
+        ' "ガイド"の「能動的ハンドリング」に基づき、IsNumericでチェックし、
+        ' 型が一致しません(Error 13)エラーを回避する
+        If IsNumeric(varProteinValue) Then
+            varProteinValue = varProteinValue / 100
+        End If
+        ' ★★★★★ 修正ここまで ★★★★★
+        
         ' --- 蛋白を空欄にする条件を上から順にチェック (ISOシートのAI列チェックは後処理で行う) ---
         ' ★修正★ 要件に基づき、転記前の蛋白スキップ判定ロジックをすべて削除。
-        '           常にフォーマットされた値を転記対象とする。
-        '           最終的な蛋白の有無は ApplyPostProcessing でのAI列チェックに一本化する。
         arrRowData(colIdxProtein) = varProteinValue
-        ' ★★★★★ 修正ここまで ★★★★★
 
-        CheckSkipConditions varSourceData(i, colIdxDate), varSourceData(i, colIdxTime), strFactorySample, strPackaging, blnShouldSkip, strSkipReason ' ★修正★ strPackaging を引数に追加
+        CheckSkipConditions varSourceData(i, colIdxDate), varSourceData(i, colIdxTime), strFactorySample, strPackaging, blnShouldSkip, strSkipReason
         If Not blnShouldSkip Then
             lngCopyCount = lngCopyCount + 1: lngDestRow = lngDestRow + 1
             For j = 1 To UBound(varDestData, 1): varDestData(j, lngDestRow) = arrRowData(j): Next j
@@ -234,7 +242,6 @@ End Sub
 ' Helper Functions
 '==================================================================================================
 Private Sub CheckSkipConditions(ByVal varDate As Variant, ByVal varTime As Variant, ByVal strSample As String, ByVal strPackaging As String, ByRef bSkip As Boolean, ByRef strReason As String)
-    ' ★修正★ strPackaging 引数を追加
     
     bSkip = False
     If IsError(varDate) Or Not IsDate(varDate) Then
