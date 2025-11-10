@@ -1,9 +1,10 @@
 '==================================================================================================
 ' Module: DataTransferModule
 ' Author: VBA Architect
-' Date:   2025/10/17 (Revised: 2025/10/17)
+' Date:   2025/10/17 (Revised: 2025/11/10)
 ' Description: 「製品」シートから「ISO」シートへデータを加工・転記するメインモジュール。
 '              指定のコードをベースに、転記後のISOシートAI列をチェックして蛋白を空欄にする処理を追加。
+'              (2025/11/10 修正: スキップ条件・整形条件の追加、蛋白判定ロジックの一本化)
 '==================================================================================================
 Option Explicit
 
@@ -34,6 +35,10 @@ Private Const CELL_EXECUTION_DATE As String = "R1"
 ' 色定義
 Private Const COLOR_DATE_MARKER As Long = vbMagenta
 
+' ★追加★ スキップ用キーワード (マジックナンバーの排除)
+Private Const SKIP_WORD_RETRY As String = "再"
+Private Const SKIP_WORD_CONT As String = "cont"
+
 ' --- モジュールレベル変数定義 ---
 Private wsProduct As Worksheet, wsISO As Worksheet, wsMaster As Worksheet
 Private m_dicMasterRowSkip As Object, m_dicMasterProteinSkip As Object, m_dicMasterCleanup As Object
@@ -44,6 +49,7 @@ Private m_dicMasterRowSkip As Object, m_dicMasterProteinSkip As Object, m_dicMas
 
 Public Sub TransferDataOrchestrator()
     Dim dtStartDate As Date, dtEndDate As Date, lngStartRow As Long, lngEndRow As Long, blnSuccess As Boolean
+    
     Application.ScreenUpdating = False
     On Error GoTo ErrHandler
     If Not InitializeSheets() Then GoTo Cleanup
@@ -118,8 +124,9 @@ End Function
 Private Function ProcessDataTransfer(ByVal lngStartRow As Long, ByVal lngEndRow As Long) As Boolean
     Dim varSourceData As Variant, varDestData() As Variant
     Dim lngRowCount As Long, lngDestRow As Long, i As Long, lngCopyCount As Long, lngSkippedCount As Long
-    Dim strSkipLog As String, dicProteinProcessed As Object, arrRowData() As Variant
-    Set dicProteinProcessed = CreateObject("Scripting.Dictionary")
+    Dim strSkipLog As String, arrRowData() As Variant
+    ' ★修正★ dicProteinProcessed は不要になったため削除
+    
     lngRowCount = lngEndRow - lngStartRow - 1: If lngRowCount <= 0 Then Exit Function
     varSourceData = wsProduct.Range(COL_COPY_START & lngStartRow + 1 & ":" & COL_COPY_END & lngEndRow - 1).Value
     ReDim varDestData(1 To UBound(varSourceData, 2), 1 To lngRowCount): ReDim arrRowData(1 To UBound(varSourceData, 2))
@@ -144,21 +151,18 @@ Private Function ProcessDataTransfer(ByVal lngStartRow As Long, ByVal lngEndRow 
         End If
 
         Dim strFactorySample As String: strFactorySample = Trim(CStr(IIf(IsError(varSourceData(i, colIdxFactory)), "", varSourceData(i, colIdxFactory))))
+        Dim strPackaging As String: strPackaging = Trim(CStr(IIf(IsError(varSourceData(i, colIdxPackaging)), "", varSourceData(i, colIdxPackaging)))) ' ★追加★
         Dim varProteinValue As Variant: varProteinValue = FormatNumberValue(varSourceData(i, srcProteinColInArray), 4)
 
+        ' ★★★★★ 修正 ★★★★★
         ' --- 蛋白を空欄にする条件を上から順にチェック (ISOシートのAI列チェックは後処理で行う) ---
-        If dicProteinProcessed.Exists(strFactorySample) Then  '--- 1. 重複サンプル名チェック
-            arrRowData(colIdxProtein) = vbNullString
-        ElseIf CStr(IIf(IsError(varSourceData(i, colIdxPackaging)), "", varSourceData(i, colIdxPackaging))) <> "" Then '--- 2. 包装形態チェック
-            arrRowData(colIdxProtein) = vbNullString
-        ElseIf varProteinValue = 0 And IsNumeric(varProteinValue) Then '--- 3. ゼロ判定チェック
-            arrRowData(colIdxProtein) = vbNullString
-        Else
-            arrRowData(colIdxProtein) = varProteinValue
-            If strFactorySample <> "" Then dicProteinProcessed(strFactorySample) = True
-        End If
+        ' ★修正★ 要件に基づき、転記前の蛋白スキップ判定ロジックをすべて削除。
+        '           常にフォーマットされた値を転記対象とする。
+        '           最終的な蛋白の有無は ApplyPostProcessing でのAI列チェックに一本化する。
+        arrRowData(colIdxProtein) = varProteinValue
+        ' ★★★★★ 修正ここまで ★★★★★
 
-        CheckSkipConditions varSourceData(i, colIdxDate), varSourceData(i, colIdxTime), strFactorySample, blnShouldSkip, strSkipReason
+        CheckSkipConditions varSourceData(i, colIdxDate), varSourceData(i, colIdxTime), strFactorySample, strPackaging, blnShouldSkip, strSkipReason ' ★修正★ strPackaging を引数に追加
         If Not blnShouldSkip Then
             lngCopyCount = lngCopyCount + 1: lngDestRow = lngDestRow + 1
             For j = 1 To UBound(varDestData, 1): varDestData(j, lngDestRow) = arrRowData(j): Next j
@@ -181,7 +185,9 @@ End Function
 
 Private Sub ApplyPostProcessing(ByVal targetRange As Range)
     '== 転記後の書式設定、データクリーンアップ、およびISOシートAI列のチェックを行う ==
+    
     Const colIdxAsh = 13, colIdxPackaging = 10, colIdxMoisture = 12, colIdxProtein = 14, colIdxFactory = 9
+    Const TRUNCATE_WORD As String = "B)W" ' ★追加★ 整形用キーワードを定数化
     
     With targetRange
         ' --- 1. 書式設定 ---
@@ -194,6 +200,23 @@ Private Sub ApplyPostProcessing(ByVal targetRange As Range)
             ' --- 2. データクリーンアップ ---
             CleanupCellText .Cells(i, colIdxFactory)
             CleanupCellText .Cells(i, colIdxPackaging)
+            
+            ' ★★★★★ 修正要件（B)W 整形） ★★★★★
+            ' Q列またはR列に「B)W」が含まれていたら、そのセルの値を「B)W」に置換する
+            Dim qCell As Range, rCell As Range
+            Set qCell = .Cells(i, colIdxFactory)
+            Set rCell = .Cells(i, colIdxPackaging)
+            
+            ' Q列のチェックと整形
+            If InStr(1, qCell.Value, TRUNCATE_WORD, vbTextCompare) > 0 Then
+                qCell.Value = TRUNCATE_WORD
+            End If
+            
+            ' R列のチェックと整形
+            If InStr(1, rCell.Value, TRUNCATE_WORD, vbTextCompare) > 0 Then
+                rCell.Value = TRUNCATE_WORD
+            End If
+            ' ★★★★★ 修正要件ここまで ★★★★★
             
             ' ★★★★★ 最重要修正箇所 ★★★★★
             ' --- 3. ISOシートのAI列をチェックし、蛋白を空欄にする ---
@@ -210,14 +233,20 @@ End Sub
 '==================================================================================================
 ' Helper Functions
 '==================================================================================================
-Private Sub CheckSkipConditions(ByVal varDate As Variant, ByVal varTime As Variant, ByVal strSample As String, ByRef bSkip As Boolean, ByRef strReason As String)
+Private Sub CheckSkipConditions(ByVal varDate As Variant, ByVal varTime As Variant, ByVal strSample As String, ByVal strPackaging As String, ByRef bSkip As Boolean, ByRef strReason As String)
+    ' ★修正★ strPackaging 引数を追加
+    
     bSkip = False
     If IsError(varDate) Or Not IsDate(varDate) Then
         bSkip = True: strReason = "日付が不正"
     ElseIf Not IsError(varTime) And CStr(varTime) <> "" And Not IsNumeric(varTime) Then
         bSkip = True: strReason = "時間が不正"
-    ElseIf InStr(1, strSample, "cont", vbTextCompare) > 0 Or InStr(1, strSample, "再", vbTextCompare) > 0 Then
-        bSkip = True: strReason = "名前に 'cont'/'再'"
+    ' ★修正★ 定数を使用
+    ElseIf InStr(1, strSample, SKIP_WORD_CONT, vbTextCompare) > 0 Or InStr(1, strSample, SKIP_WORD_RETRY, vbTextCompare) > 0 Then
+        bSkip = True: strReason = "名前(Q列)に '" & SKIP_WORD_CONT & "'/'" & SKIP_WORD_RETRY & "'"
+    ' ★追加★ R列の'再'チェック
+    ElseIf InStr(1, strPackaging, SKIP_WORD_RETRY, vbTextCompare) > 0 Then
+        bSkip = True: strReason = "包装形態(R列)に '" & SKIP_WORD_RETRY & "'"
     ElseIf m_dicMasterRowSkip.Exists(strSample) Then
         bSkip = True: strReason = "マスタ(B列)に一致"
     End If
